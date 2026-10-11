@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=2.0.0",
     "seleniumbase>=4.25.0",
     "beautifulsoup4>=4.12.0",
 ]

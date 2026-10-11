@@ -5,11 +5,9 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from typing import Any, Optional
+from typing import Optional
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.server.mcpserver import MCPServer
 
 from browser import McMasterBrowser, ProductDetails
 
@@ -63,165 +61,100 @@ def format_product(product: ProductDetails) -> str:
     return json.dumps(data, indent=2)
 
 
-def format_search_results(products: list) -> str:
-    """Format search results as JSON."""
-    results = []
-    for p in products:
-        results.append({
-            "part_number": p.part_number,
-            "name": p.name,
-            "url": p.url
-        })
-    return json.dumps(results, indent=2)
-
-
 # Create the MCP server
-server = Server("mcmaster-carr")
+server = MCPServer("mcmaster-carr")
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools."""
-    return [
-        Tool(
-            name="mcmaster_get_product",
-            description="Get detailed product information from McMaster-Carr by part number. Returns name and 10-35+ specifications (material, size, pressure ratings, thread type, etc.).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "part_number": {
-                        "type": "string",
-                        "description": "McMaster-Carr part number (e.g., '47865K23', '2864N2')"
-                    }
-                },
-                "required": ["part_number"]
-            }
-        ),
-        Tool(
-            name="mcmaster_search",
-            description="Search McMaster-Carr and return product categories matching the query. Due to McMaster's JavaScript-heavy site, this returns category-level results. For specific products, you'll need a part number to use with mcmaster_get_product.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (e.g., 'ball valve', 'motorized actuator', 'brass fitting')"
-                    }
-                },
-                "required": ["query"]
-            }
-        ),
-        Tool(
-            name="mcmaster_url",
-            description="Generate a McMaster-Carr URL for a part number or search query without fetching data. Fast, no browser needed.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "part_number": {
-                        "type": "string",
-                        "description": "McMaster-Carr part number"
-                    },
-                    "search_query": {
-                        "type": "string",
-                        "description": "Search query (alternative to part_number)"
-                    }
-                }
-            }
-        )
-    ]
+@server.tool(
+    name="mcmaster_get_product",
+    description="Get detailed product information from McMaster-Carr by part number. Returns name and 10-35+ specifications (material, size, pressure ratings, thread type, etc.).",
+)
+async def mcmaster_get_product(part_number: str) -> str:
+    """Get detailed product information from McMaster-Carr by part number.
 
+    Args:
+        part_number: McMaster-Carr part number (e.g., '47865K23', '2864N2')
+    """
+    part_num = part_number.strip()
+    if not part_num:
+        return "Error: part_number is required"
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle tool calls."""
     try:
-        if name == "mcmaster_get_product":
-            part_number = arguments.get("part_number", "").strip()
-            if not part_number:
-                return [TextContent(
-                    type="text",
-                    text="Error: part_number is required"
-                )]
-
-            product = await get_product_async(part_number)
-            return [TextContent(
-                type="text",
-                text=format_product(product)
-            )]
-
-        elif name == "mcmaster_search":
-            query = arguments.get("query", "").strip()
-            if not query:
-                return [TextContent(
-                    type="text",
-                    text="Error: query is required"
-                )]
-
-            products = await search_async(query)
-            if not products:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "query": query,
-                        "results": [],
-                        "url": McMasterBrowser.get_search_url(query),
-                        "note": "No products found. Try a different search term or open the URL directly."
-                    }, indent=2)
-                )]
-
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "query": query,
-                    "count": len(products),
-                    "results": [{"part_number": p.part_number, "name": p.name, "url": p.url} for p in products]
-                }, indent=2)
-            )]
-
-        elif name == "mcmaster_url":
-            part_number = arguments.get("part_number", "").strip()
-            search_query = arguments.get("search_query", "").strip()
-
-            if part_number:
-                url = McMasterBrowser.get_product_url(part_number)
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"url": url, "type": "product"}, indent=2)
-                )]
-            elif search_query:
-                url = McMasterBrowser.get_search_url(search_query)
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"url": url, "type": "search"}, indent=2)
-                )]
-            else:
-                return [TextContent(
-                    type="text",
-                    text="Error: either part_number or search_query is required"
-                )]
-
-        else:
-            return [TextContent(
-                type="text",
-                text=f"Unknown tool: {name}"
-            )]
-
+        product = await get_product_async(part_num)
+        return format_product(product)
     except Exception as e:
-        return [TextContent(
-            type="text",
-            text=f"Error: {str(e)}"
-        )]
+        return f"Error: {str(e)}"
 
 
-async def main_async():
-    """Run the MCP server (async)."""
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+@server.tool(
+    name="mcmaster_search",
+    description="Search McMaster-Carr and return product categories matching the query. Due to McMaster's JavaScript-heavy site, this returns category-level results. For specific products, you'll need a part number to use with mcmaster_get_product.",
+)
+async def mcmaster_search(query: str) -> str:
+    """Search McMaster-Carr and return product categories/results matching query.
+
+    Args:
+        query: Search query (e.g., 'ball valve', 'motorized actuator', 'brass fitting')
+    """
+    q = query.strip()
+    if not q:
+        return "Error: query is required"
+
+    try:
+        products = await search_async(q)
+        if not products:
+            return json.dumps(
+                {
+                    "query": q,
+                    "results": [],
+                    "url": McMasterBrowser.get_search_url(q),
+                    "note": "No products found. Try a different search term or open the URL directly.",
+                },
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "query": q,
+                "count": len(products),
+                "results": [
+                    {"part_number": p.part_number, "name": p.name, "url": p.url}
+                    for p in products
+                ],
+            },
+            indent=2,
+        )
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@server.tool(
+    name="mcmaster_url",
+    description="Generate a McMaster-Carr URL for a part number or search query without fetching data. Fast, no browser needed.",
+)
+def mcmaster_url(part_number: Optional[str] = None, search_query: Optional[str] = None) -> str:
+    """Generate a McMaster-Carr URL for a part number or search query without fetching data.
+
+    Args:
+        part_number: McMaster-Carr part number
+        search_query: Search query (alternative to part_number)
+    """
+    pn = (part_number or "").strip()
+    sq = (search_query or "").strip()
+
+    if pn:
+        url = McMasterBrowser.get_product_url(pn)
+        return json.dumps({"url": url, "type": "product"}, indent=2)
+    elif sq:
+        url = McMasterBrowser.get_search_url(sq)
+        return json.dumps({"url": url, "type": "search"}, indent=2)
+    else:
+        return "Error: either part_number or search_query is required"
 
 
 def main():
     """Run the MCP server (sync entry point)."""
-    asyncio.run(main_async())
+    server.run(transport="stdio")
 
 
 if __name__ == "__main__":
