@@ -53,6 +53,18 @@ async def search_async(query: str) -> list:
     return await loop.run_in_executor(_executor, _search_sync, query)
 
 
+def _download_cad_sync(part_number: str, file_format: str, output_dir: Optional[str]) -> dict:
+    """Sync wrapper for download_cad."""
+    browser = get_browser()
+    return browser.download_cad(part_number, file_format=file_format, output_dir=output_dir)
+
+
+async def download_cad_async(part_number: str, file_format: str = "3-D STEP", output_dir: Optional[str] = None) -> dict:
+    """Async wrapper for download_cad."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, _download_cad_sync, part_number, file_format, output_dir)
+
+
 def format_product(product: ProductDetails) -> str:
     """Format product info as JSON."""
     data = asdict(product)
@@ -150,6 +162,34 @@ def mcmaster_url(part_number: Optional[str] = None, search_query: Optional[str] 
         return json.dumps({"url": url, "type": "search"}, indent=2)
     else:
         return "Error: either part_number or search_query is required"
+
+
+
+@server.tool(
+    name="mcmaster_download_cad",
+    description="Download authentic 3D CAD model (STEP, SolidWorks, IGES, SAT) or 2D drawing (DWG, DXF, PDF) directly from McMaster-Carr to disk.",
+)
+async def mcmaster_download_cad(
+    part_number: str,
+    file_format: str = "3-D STEP",
+    output_dir: Optional[str] = None,
+) -> str:
+    """Download authentic CAD models from McMaster-Carr.
+
+    Args:
+        part_number: McMaster-Carr part number (e.g., '91290A115', '9414T11', '1497K24')
+        file_format: CAD format: '3-D STEP' (default), '3-D SolidWorks', '3-D IGES', '3-D SAT', '2-D DWG', '2-D DXF', '2-D PDF'
+        output_dir: Target directory path to save the CAD file (defaults to ./downloads)
+    """
+    part_num = part_number.strip()
+    if not part_num:
+        return json.dumps({"success": False, "error": "part_number is required"}, indent=2)
+
+    try:
+        res = await download_cad_async(part_num, file_format, output_dir)
+        return json.dumps(res, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e), "part_number": part_num}, indent=2)
 
 
 def main():
