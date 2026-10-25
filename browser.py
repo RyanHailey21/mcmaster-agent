@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 import re
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -334,6 +335,163 @@ class McMasterBrowser:
             url=url,
             specs=specs
         )
+
+    def download_cad(
+        self,
+        part_number: str,
+        file_format: str = "3-D STEP",
+        output_dir: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Download authentic CAD model (STEP, SolidWorks, IGES, SAT, DWG, DXF, PDF) for a part.
+
+        Args:
+            part_number: McMaster-Carr part number (e.g., '91290A115', '9414T11', '1497K24')
+            file_format: Desired CAD file format (e.g., '3-D STEP', '3-D SolidWorks', '3-D IGES', '2-D PDF')
+            output_dir: Destination folder path (defaults to ./downloads)
+            timeout: Maximum seconds to wait for the download to complete
+
+        Returns:
+            Dictionary with download details: success, part_number, format, file_name, file_path, size_bytes, sha256
+        """
+        part_num = part_number.strip().upper()
+        if not part_num:
+            return {"success": False, "error": "Part number is required", "part_number": part_number}
+
+        # Normalize format name
+        fmt_lower = file_format.lower()
+        if "step" in fmt_lower or "stp" in fmt_lower:
+            format_target = "3-D STEP"
+        elif "solidworks" in fmt_lower or "sldprt" in fmt_lower:
+            format_target = "3-D SolidWorks"
+        elif "iges" in fmt_lower or "igs" in fmt_lower:
+            format_target = "3-D IGES"
+        elif "sat" in fmt_lower:
+            format_target = "3-D SAT"
+        elif "dwg" in fmt_lower:
+            format_target = "2-D DWG"
+        elif "dxf" in fmt_lower:
+            format_target = "2-D DXF"
+        elif "pdf" in fmt_lower:
+            format_target = "2-D PDF"
+        else:
+            format_target = file_format
+
+        dest_dir = Path(output_dir).resolve() if output_dir else Path.cwd() / "downloads"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self._sb:
+            self.start()
+
+        url = f"https://www.mcmaster.com/{part_num}"
+        self._sb.activate_cdp_mode(url)
+        time.sleep(3)
+
+        # Configure CDP download destination
+        self._sb.cdp.set_download_path(str(dest_dir))
+
+        # Check if CAD model is available for this part
+        cad_available = self._sb.cdp.evaluate(
+            """(function() {
+                return !!document.querySelector('button[aria-label="Select CAD file type"]');
+            })()"""
+        )
+        if not cad_available:
+            return {
+                "success": False,
+                "error": f"No CAD model available for part {part_num} on McMaster-Carr",
+                "part_number": part_num,
+                "url": url,
+            }
+
+        # Open format dropdown
+        try:
+            self._sb.cdp.click('button[aria-label="Select CAD file type"]')
+            time.sleep(1)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to click CAD format dropdown: {e}",
+                "part_number": part_num,
+                "url": url,
+            }
+
+        # Select desired format
+        option_selector = f'li[id*="{format_target}"]'
+        try:
+            self._sb.cdp.click(option_selector)
+            time.sleep(1.5)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Requested format '{format_target}' not available for part {part_num}: {e}",
+                "part_number": part_num,
+                "url": url,
+            }
+
+        files_before = set(os.listdir(dest_dir))
+
+        # Click the download button
+        try:
+            self._sb.cdp.click('button[class*="downloadButton"]')
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to click download button: {e}",
+                "part_number": part_num,
+                "url": url,
+            }
+
+        # Poll for completed download
+        downloaded_file = None
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            current_files = set(os.listdir(dest_dir)) - files_before
+            complete_files = [
+                f for f in current_files
+                if not f.endswith('.crdownload')
+                and not f.endswith('.tmp')
+                and not f.endswith('.htm')
+                and not f.endswith('.html')
+            ]
+            if complete_files:
+                candidate = dest_dir / complete_files[0]
+                try:
+                    size1 = candidate.stat().st_size
+                    time.sleep(0.5)
+                    size2 = candidate.stat().st_size
+                    if size1 == size2 and size1 > 0:
+                        downloaded_file = candidate
+                        break
+                except (OSError, FileNotFoundError):
+                    pass
+            time.sleep(0.5)
+
+        if not downloaded_file or not downloaded_file.exists():
+            return {
+                "success": False,
+                "error": f"Download timed out after {timeout} seconds",
+                "part_number": part_num,
+                "url": url,
+            }
+
+        # Calculate SHA-256
+        h = hashlib.sha256()
+        with open(downloaded_file, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        sha256_hash = h.hexdigest()
+
+        return {
+            "success": True,
+            "part_number": part_num,
+            "format": format_target,
+            "file_name": downloaded_file.name,
+            "file_path": str(downloaded_file),
+            "size_bytes": downloaded_file.stat().st_size,
+            "sha256": sha256_hash,
+            "url": url,
+        }
 
     def _analyze_page(self) -> PageState:
         """Analyze the current page and extract structured data."""
