@@ -169,7 +169,8 @@ Generate McMaster URLs without fetching. Fast, no browser needed.
 
 1. **SeleniumBase UC Mode** - Undetected Chromium driver bypasses bot detection
 2. **Visible Browser** - McMaster blocks headless browsers, so a Chrome window briefly appears
-3. **Cookie Persistence** - Browser profile saved to `~/.mcmaster-browser` for faster subsequent requests
+3. **Cookie Persistence** - Each browser keeps its own profile, `~/.mcmaster-browser/worker-<n>`, for faster subsequent requests
+4. **Parallel workers** - Up to `MCMASTER_WORKERS` calls (default 3) run at once, each in its own visible browser. Each browser claims a free profile slot with an OS file lock. Chrome allows one instance per profile, so two servers (for example two agent sessions) never share one; a shared profile made Chrome fail with "chrome not reachable". Set `MCMASTER_PROFILE_DIR` to force a single profile directory, and `MCMASTER_WORKERS=1` for one browser.
 4. **BeautifulSoup** - Parses spec tables from rendered HTML
 
 ## Limitations

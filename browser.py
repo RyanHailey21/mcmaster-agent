@@ -6,6 +6,9 @@ import subprocess
 import time
 import re
 import hashlib
+import shutil
+import threading
+import uuid
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +17,56 @@ from bs4 import BeautifulSoup
 
 # Default location for browser profile (persists cookies)
 DEFAULT_PROFILE_DIR = Path.home() / ".mcmaster-browser"
+
+# Chrome lets only one running instance use a profile directory. When several browsers ran on one shared profile
+# (two MCP server processes, or parallel workers), every Chrome after the first handed off to the running one and
+# exited, and Selenium failed with "cannot connect to chrome ... chrome not reachable". So each browser now claims
+# its own profile slot, DEFAULT_PROFILE_DIR/worker-<n>, held by an OS file lock that is released automatically if
+# the process dies. A slot keeps its cookies between sessions. Set MCMASTER_PROFILE_DIR to force one directory.
+MAX_PROFILE_SLOTS = 32
+_slot_lock = threading.Lock()
+_slot_handles: dict = {}
+
+# SeleniumBase UC mode patches the chromedriver binary at startup; starting several at once can race on it.
+_START_LOCK = threading.Lock()
+
+
+def _try_lock(fh) -> bool:
+    fh.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def claim_profile_slot(base: Path = DEFAULT_PROFILE_DIR) -> Path:
+    """Claim a free worker profile directory and hold its lock until release_profile_slot (or process exit)."""
+    base.mkdir(parents=True, exist_ok=True)
+    with _slot_lock:
+        for n in range(MAX_PROFILE_SLOTS):
+            profile = base / f"worker-{n}"
+            if profile in _slot_handles:
+                continue
+            fh = open(base / f"worker-{n}.lock", "a+")
+            if _try_lock(fh):
+                _slot_handles[profile] = fh
+                profile.mkdir(exist_ok=True)
+                return profile
+            fh.close()
+    raise RuntimeError(f"All {MAX_PROFILE_SLOTS} McMaster browser profile slots under {base} are in use")
+
+
+def release_profile_slot(profile: Path) -> None:
+    with _slot_lock:
+        fh = _slot_handles.pop(profile, None)
+    if fh is not None:
+        fh.close()          # closing the handle releases the lock
 
 
 @dataclass
@@ -62,13 +115,19 @@ class McMasterBrowser:
         self._logged_in = False
         self._username = username
         self._password = password
-        self._profile_dir = Path(profile_dir) if profile_dir else DEFAULT_PROFILE_DIR
-        self._profile_dir.mkdir(parents=True, exist_ok=True)
+        forced = profile_dir or os.environ.get("MCMASTER_PROFILE_DIR")
+        self._profile_dir = Path(forced) if forced else None   # None: claim a worker slot in start()
+        self._claimed_slot = False
+        if self._profile_dir:
+            self._profile_dir.mkdir(parents=True, exist_ok=True)
 
     def start(self):
         """Start the browser session."""
         if self._sb is None:
             from seleniumbase import SB
+            if self._profile_dir is None:
+                self._profile_dir = claim_profile_slot()
+                self._claimed_slot = True
             # Use headless2 mode (newer, harder to detect) for headless operation
             # Use user_data_dir to persist cookies across sessions
             if self.headless:
@@ -81,8 +140,19 @@ class McMasterBrowser:
                     uc=True, headless=False, test=True,
                     user_data_dir=str(self._profile_dir)
                 )
-            self._sb = self._sb_context.__enter__()
+            try:
+                with _START_LOCK:
+                    self._sb = self._sb_context.__enter__()
+            except Exception:
+                self._release_slot()
+                raise
         return self
+
+    def _release_slot(self):
+        if self._claimed_slot and self._profile_dir is not None:
+            release_profile_slot(self._profile_dir)
+            self._profile_dir = None
+            self._claimed_slot = False
 
     def _get_credentials(self) -> tuple[str, str]:
         """Get McMaster credentials from env vars, params, or 1Password."""
@@ -196,6 +266,7 @@ class McMasterBrowser:
             except Exception:
                 pass
             self._sb = None
+        self._release_slot()
 
     def __enter__(self):
         return self.start()
@@ -388,8 +459,6 @@ class McMasterBrowser:
         self._sb.activate_cdp_mode(url)
         time.sleep(3)
 
-        # Configure CDP download destination
-        self._sb.cdp.set_download_path(str(dest_dir))
 
         # Check if CAD model is available for this part
         cad_available = self._sb.cdp.evaluate(
@@ -430,12 +499,18 @@ class McMasterBrowser:
                 "url": url,
             }
 
-        files_before = set(os.listdir(dest_dir))
+        # Download into a private staging folder, then move the file into dest_dir. Detecting "the new file" by
+        # diffing dest_dir was ambiguous when parallel workers downloaded into the same folder.
+        staging = dest_dir / f".mcmaster-dl-{uuid.uuid4().hex[:12]}"
+        staging.mkdir()
+        self._sb.cdp.set_download_path(str(staging))
+        files_before = set()
 
         # Click the download button
         try:
             self._sb.cdp.click('button[class*="downloadButton"]')
         except Exception as e:
+            shutil.rmtree(staging, ignore_errors=True)
             return {
                 "success": False,
                 "error": f"Failed to click download button: {e}",
@@ -447,7 +522,7 @@ class McMasterBrowser:
         downloaded_file = None
         start_time = time.time()
         while time.time() - start_time < timeout:
-            current_files = set(os.listdir(dest_dir)) - files_before
+            current_files = set(os.listdir(staging)) - files_before
             complete_files = [
                 f for f in current_files
                 if not f.endswith('.crdownload')
@@ -456,7 +531,7 @@ class McMasterBrowser:
                 and not f.endswith('.html')
             ]
             if complete_files:
-                candidate = dest_dir / complete_files[0]
+                candidate = staging / complete_files[0]
                 try:
                     size1 = candidate.stat().st_size
                     time.sleep(0.5)
@@ -467,6 +542,12 @@ class McMasterBrowser:
                 except (OSError, FileNotFoundError):
                     pass
             time.sleep(0.5)
+
+        if downloaded_file and downloaded_file.exists():
+            final = dest_dir / downloaded_file.name
+            os.replace(downloaded_file, final)
+            downloaded_file = final
+        shutil.rmtree(staging, ignore_errors=True)
 
         if not downloaded_file or not downloaded_file.exists():
             return {

@@ -6,6 +6,7 @@ import atexit
 import json
 import os
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -23,21 +24,36 @@ from mcp.server.mcpserver import MCPServer
 from browser import McMasterBrowser, ProductDetails
 
 
-# Thread pool for running sync browser operations
-_executor = ThreadPoolExecutor(max_workers=1)
-
-# Global browser instance (reuses session and cookies)
-_browser: Optional[McMasterBrowser] = None
+# Worker pool: each worker thread owns one visible browser with its own profile slot (see browser.py), so up to
+# MCMASTER_WORKERS calls run in parallel. Calls beyond that queue. A worker's browser is started on its first call
+# and reused after that (it keeps the session and cookies). Set MCMASTER_WORKERS=1 for the old one-browser behaviour.
+WORKERS = max(1, int(os.environ.get("MCMASTER_WORKERS", "3")))
+_executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="mcmaster-worker")
+_local = threading.local()
+_browsers: list = []
+_browsers_lock = threading.Lock()
 
 
 def get_browser() -> McMasterBrowser:
-    """Get or create the McMaster browser. Uses visible browser since McMaster blocks headless."""
-    global _browser
-    if _browser is None:
+    """This worker thread's browser, started on first use. Visible, since McMaster blocks headless browsers."""
+    browser = getattr(_local, "browser", None)
+    if browser is None:
         browser = McMasterBrowser(headless=False)
         browser.start()
-        _browser = browser
-    return _browser
+        _local.browser = browser
+        with _browsers_lock:
+            _browsers.append(browser)
+    return browser
+
+
+def _stop_browsers():
+    with _browsers_lock:
+        for b in _browsers:
+            b.stop()
+        _browsers.clear()
+
+
+atexit.register(_stop_browsers)
 
 
 def _get_product_sync(part_number: str) -> ProductDetails:
