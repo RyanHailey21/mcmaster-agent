@@ -2,10 +2,21 @@
 # ABOUTME: Provides tools to search and lookup product information via web scraping.
 
 import asyncio
+import atexit
 import json
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from pathlib import Path
 from typing import Optional
+
+# SeleniumBase creates and clears ./downloaded_files during browser startup.
+# Give each server process its own writable directory before importing it.
+_original_working_dir = Path.cwd()
+_working_dir = tempfile.TemporaryDirectory(prefix="mcmaster-mcp-", ignore_cleanup_errors=True)
+os.chdir(_working_dir.name)
+atexit.register(os.chdir, _original_working_dir)
 
 from mcp.server.mcpserver import MCPServer
 
@@ -23,8 +34,9 @@ def get_browser() -> McMasterBrowser:
     """Get or create the McMaster browser. Uses visible browser since McMaster blocks headless."""
     global _browser
     if _browser is None:
-        _browser = McMasterBrowser(headless=False)
-        _browser.start()
+        browser = McMasterBrowser(headless=False)
+        browser.start()
+        _browser = browser
     return _browser
 
 
@@ -56,7 +68,10 @@ async def search_async(query: str) -> list:
 def _download_cad_sync(part_number: str, file_format: str, output_dir: Optional[str]) -> dict:
     """Sync wrapper for download_cad."""
     browser = get_browser()
-    return browser.download_cad(part_number, file_format=file_format, output_dir=output_dir)
+    destination = Path(output_dir) if output_dir else Path("downloads")
+    if not destination.is_absolute():
+        destination = _original_working_dir / destination
+    return browser.download_cad(part_number, file_format=file_format, output_dir=str(destination))
 
 
 async def download_cad_async(part_number: str, file_format: str = "3-D STEP", output_dir: Optional[str] = None) -> dict:

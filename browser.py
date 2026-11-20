@@ -6,6 +6,7 @@ import subprocess
 import time
 import re
 import hashlib
+from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -560,7 +561,13 @@ class McMasterBrowser:
                 for child in row.find_all(class_=True, recursive=False):
                     child_classes = ' '.join(child.get('class', []))
                     if 'tableCell' in child_classes:
-                        cells.append(child.get_text(strip=True))
+                        # Preserve spaces around inline fractions and separate
+                        # values rendered on individual lines.
+                        cell = copy(child)
+                        for br in cell.find_all('br'):
+                            br.replace_with('\0')
+                        parts = (' '.join(part.split()) for part in cell.get_text().split('\0'))
+                        cells.append(', '.join(part for part in parts if part))
 
                 if len(cells) >= 2:
                     label = cells[0]
@@ -606,8 +613,8 @@ class McMasterBrowser:
             for part_num_raw in matches:
                 part_num = part_num_raw.upper()
                 # Get name from alt attribute
-                name = img.get('alt', '') or img.get('title', '') or ""
-                if name and len(name) < 200:
+                name = (img.get('alt', '') or img.get('title', '') or "").strip()
+                if name and name.casefold() not in {'spec image', 'product image', 'image'} and len(name) < 200:
                     products.append(ProductSummary(
                         part_number=part_num,
                         name=name[:100],
