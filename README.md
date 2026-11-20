@@ -9,6 +9,7 @@ Uses SeleniumBase UC mode to extract product data from JavaScript-rendered pages
 
 ## Features
 
+- **CAD Model Download**: Download authentic 3D CAD models (STEP, SolidWorks, IGES, SAT) and 2D drawings directly to disk
 - **Product Lookup**: Get detailed specs (10-35+ fields) for any McMaster-Carr part number
 - **Search**: Search for products and get part numbers from results
 - **URL Generation**: Generate McMaster URLs without fetching (fast, no browser)
@@ -114,6 +115,38 @@ The search automatically navigates through McMaster's category structure to find
 }
 ```
 
+### mcmaster_download_cad
+
+Download authentic 3D CAD models (STEP, SolidWorks, IGES, SAT, etc.) or 2D drawings (DWG, DXF, PDF) for any McMaster-Carr part number directly to disk with SHA-256 checksum verification.
+
+**Input:**
+```json
+{
+  "part_number": "91290A115",
+  "file_format": "3-D STEP",
+  "output_dir": "C:/path/to/downloads"
+}
+```
+
+**Parameters:**
+- `part_number` (string, required): McMaster-Carr part number (e.g., `'91290A115'`, `'9414T11'`, `'1497K24'`).
+- `file_format` (string, optional): Desired format. Defaults to `'3-D STEP'`. Supports `'3-D STEP'`, `'3-D SolidWorks'`, `'3-D IGES'`, `'3-D SAT'`, `'2-D DWG'`, `'2-D DXF'`, `'2-D PDF'`.
+- `output_dir` (string, optional): Target directory path. Defaults to `./downloads`.
+
+**Returns:**
+```json
+{
+  "success": true,
+  "part_number": "91290A115",
+  "format": "3-D STEP",
+  "file_name": "91290A115_Black-Oxide Alloy Steel Socket Head Screw.STEP",
+  "file_path": "C:\\path\\to\\downloads\\91290A115_Black-Oxide Alloy Steel Socket Head Screw.STEP",
+  "size_bytes": 1593856,
+  "sha256": "80fb2b75a40bbd08593a1cfbb42c556b68ce57ee4506c9a341e427d1421f19c4",
+  "url": "https://www.mcmaster.com/91290A115"
+}
+```
+
 ### mcmaster_url
 
 Generate McMaster URLs without fetching. Fast, no browser needed.
@@ -158,6 +191,7 @@ Run tests:
 ```bash
 python test_agent.py
 python test_search.py
+python test_cad.py
 ```
 
 Test the browser directly:
