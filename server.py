@@ -35,8 +35,15 @@ _browsers_lock = threading.Lock()
 
 
 def get_browser() -> McMasterBrowser:
-    """This worker thread's browser, started on first use. Visible, since McMaster blocks headless browsers."""
+    """This worker thread's browser, started on first use. Visible, since McMaster blocks headless browsers.
+
+    A browser whose window was closed or whose Chrome crashed is discarded and a fresh one started, so the worker
+    does not fail every later call until the server restarts.
+    """
     browser = getattr(_local, "browser", None)
+    if browser is not None and not browser.is_alive():
+        _discard_browser(browser)
+        browser = None
     if browser is None:
         browser = McMasterBrowser(headless=False)
         browser.start()
@@ -44,6 +51,32 @@ def get_browser() -> McMasterBrowser:
         with _browsers_lock:
             _browsers.append(browser)
     return browser
+
+
+def _discard_browser(browser) -> None:
+    """Stop this worker's (dead) browser and forget it, releasing its profile slot."""
+    try:
+        browser.stop()
+    except Exception:
+        pass
+    with _browsers_lock:
+        if browser in _browsers:
+            _browsers.remove(browser)
+    if getattr(_local, "browser", None) is browser:
+        _local.browser = None
+
+
+def _with_browser(action):
+    """Run action(browser) on this worker's browser. If it fails because the browser died (window closed, Chrome
+    crashed), retry once on a fresh browser; any other error is raised unchanged."""
+    browser = get_browser()
+    try:
+        return action(browser)
+    except Exception:
+        if browser.is_alive():
+            raise
+        _discard_browser(browser)
+    return action(get_browser())
 
 
 def _stop_browsers():
@@ -58,15 +91,12 @@ atexit.register(_stop_browsers)
 
 def _get_product_sync(part_number: str) -> ProductDetails:
     """Sync wrapper for get_product."""
-    browser = get_browser()
-    return browser.get_product(part_number)
+    return _with_browser(lambda browser: browser.get_product(part_number))
 
 
 def _search_sync(query: str) -> list:
     """Sync wrapper for search."""
-    browser = get_browser()
-    state = browser.search(query)
-    return state.products
+    return _with_browser(lambda browser: browser.search(query).products)
 
 
 async def get_product_async(part_number: str) -> ProductDetails:
@@ -83,11 +113,12 @@ async def search_async(query: str) -> list:
 
 def _download_cad_sync(part_number: str, file_format: str, output_dir: Optional[str]) -> dict:
     """Sync wrapper for download_cad."""
-    browser = get_browser()
     destination = Path(output_dir) if output_dir else Path("downloads")
     if not destination.is_absolute():
         destination = _original_working_dir / destination
-    return browser.download_cad(part_number, file_format=file_format, output_dir=str(destination))
+    return _with_browser(
+        lambda browser: browser.download_cad(part_number, file_format=file_format, output_dir=str(destination))
+    )
 
 
 async def download_cad_async(part_number: str, file_format: str = "3-D STEP", output_dir: Optional[str] = None) -> dict:

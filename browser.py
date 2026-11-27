@@ -1,8 +1,10 @@
 # ABOUTME: McMaster-Carr browser automation controller.
 # ABOUTME: Uses SeleniumBase UC mode to extract product data with authentication.
 
+import json
 import os
 import subprocess
+import urllib.request
 import time
 import re
 import hashlib
@@ -14,6 +16,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
+
+DEVTOOLS_TIMEOUT_S = 2.0
+
+
+def _debugger_address(sb) -> Optional[str]:
+    """host:port of Chrome's DevTools endpoint, from the session capabilities (cached locally, no WebDriver call)."""
+    try:
+        return sb.driver.capabilities.get("goog:chromeOptions", {}).get("debuggerAddress") or None
+    except Exception:
+        return None
+
+
+def _devtools_json(addr: str, path: str):
+    with urllib.request.urlopen(f"http://{addr}{path}", timeout=DEVTOOLS_TIMEOUT_S) as r:
+        return json.load(r)
+
+
+def _devtools_browser_id(addr: Optional[str]) -> Optional[str]:
+    """The running Chrome's browser id (the GUID in its webSocketDebuggerUrl), unique per Chrome process."""
+    if not addr:
+        return None
+    try:
+        return _devtools_json(addr, "/json/version").get("webSocketDebuggerUrl", "").rsplit("/", 1)[-1] or None
+    except Exception:
+        return None
+
 
 # Default location for browser profile (persists cookies)
 DEFAULT_PROFILE_DIR = Path.home() / ".mcmaster-browser"
@@ -146,7 +174,32 @@ class McMasterBrowser:
             except Exception:
                 self._release_slot()
                 raise
+            self._devtools_addr = _debugger_address(self._sb)
+            self._devtools_browser_id = _devtools_browser_id(self._devtools_addr)
         return self
+
+    def is_alive(self) -> bool:
+        """True while this browser's Chrome is running and has an open page; False once the user closed its window
+        or Chrome crashed (then every call on it fails until the server restarts).
+
+        Asks Chrome's DevTools endpoint, not WebDriver: in UC mode SeleniumBase disconnects chromedriver after
+        sb.open() and for good in CDP mode, so WebDriver calls such as window_handles are refused on a healthy
+        browser. The browser id from /json/version is compared with the one recorded at start, so another worker's
+        Chrome that later takes the same debugging port is not mistaken for this one. When the address is unknown,
+        the browser is assumed alive (the behaviour before this check).
+        """
+        if self._sb is None:
+            return False
+        addr = getattr(self, "_devtools_addr", None)
+        if not addr:
+            return True
+        try:
+            recorded = getattr(self, "_devtools_browser_id", None)
+            if recorded is not None and _devtools_browser_id(addr) != recorded:
+                return False
+            return any(t.get("type") == "page" for t in _devtools_json(addr, "/json/list"))
+        except Exception:
+            return False
 
     def _release_slot(self):
         if self._claimed_slot and self._profile_dir is not None:
